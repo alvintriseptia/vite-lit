@@ -13,7 +13,6 @@ export class CounterElement extends LitElement {
   render() {
     return html`
       <div class="counter-container">
-        <h2>HMR Test Counter</h2>
         <p>Count: <strong>${this.count}</strong></p>
         <div class="button-group">
           <button @click=${this._decrement}>-</button>
@@ -54,7 +53,7 @@ export class CounterElement extends LitElement {
     }
 
     h2 {
-      color: #646cff;
+      color: #ff6464;
       margin-top: 0;
       font-size: 2em;
     }

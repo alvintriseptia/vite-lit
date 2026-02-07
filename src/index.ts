@@ -58,6 +58,108 @@ function isLitFile(code: string): boolean {
 const HMR_RUNTIME = `
 if (!window.__LIT_HMR_REGISTRY__) {
   window.__LIT_HMR_REGISTRY__ = new Map();
+  window.__LIT_HMR_NEEDS_RELOAD__ = false;
+  window.__LIT_HMR_RELOAD_REASON__ = '';
+
+  /**
+   * Detect constructor changes between old and new class.
+   * Compares constructor source and parses 'this.xxx =' patterns
+   * to report which fields were added/removed.
+   */
+  window.__litHmrConstructorChanged = function(OldClass, NewClass) {
+    // OldClass.prototype.constructor.toString() returns the ENTIRE class source,
+    // so we need to extract just the constructor body to avoid false positives
+    // from CSS/render/method changes.
+    function extractConstructorBody(classSource) {
+      var ctorMatch = classSource.match(/constructor\\s*\\([^)]*\\)\\s*\\{/);
+      if (!ctorMatch) return null;
+      var start = classSource.indexOf(ctorMatch[0]) + ctorMatch[0].length;
+      var braceCount = 1;
+      var pos = start;
+      while (pos < classSource.length && braceCount > 0) {
+        if (classSource[pos] === '{') braceCount++;
+        if (classSource[pos] === '}') braceCount--;
+        pos++;
+      }
+      return classSource.slice(start, pos - 1).trim();
+    }
+
+    var oldSource = OldClass.prototype.constructor.toString();
+    var newSource = NewClass.prototype.constructor.toString();
+    var oldBody = extractConstructorBody(oldSource);
+    var newBody = extractConstructorBody(newSource);
+
+    // If neither class has an explicit constructor, no change
+    if (oldBody === null && newBody === null) return null;
+    // If both have the same constructor body, no change
+    if (oldBody === newBody) return null;
+
+    // Parse 'this.xxx =' assignments to report specifics
+    var fieldPattern = /this\\.([a-zA-Z_$][\\w$]*)\\s*=/g;
+    var oldFields = new Set();
+    var newFields = new Set();
+    var m;
+    if (oldBody) { while ((m = fieldPattern.exec(oldBody)) !== null) oldFields.add(m[1]); }
+    fieldPattern.lastIndex = 0;
+    if (newBody) { while ((m = fieldPattern.exec(newBody)) !== null) newFields.add(m[1]); }
+
+    var added = [...newFields].filter(function(f) { return !oldFields.has(f); });
+    var removed = [...oldFields].filter(function(f) { return !newFields.has(f); });
+
+    var details = [];
+    if (added.length) details.push('added fields: ' + added.join(', '));
+    if (removed.length) details.push('removed fields: ' + removed.join(', '));
+    if (!details.length) details.push('constructor body changed');
+
+    return 'Constructor changed (' + details.join('; ') + ')';
+  };
+
+  /**
+   * Detect changes in reactive property declarations.
+   * Compares key sets of elementProperties (populated by @property()/@state()).
+   */
+  window.__litHmrElementPropertiesChanged = function(OldClass, NewClass) {
+    const oldProps = OldClass.elementProperties;
+    const newProps = NewClass.elementProperties;
+    if (!oldProps && !newProps) return null;
+
+    const oldKeys = oldProps ? [...oldProps.keys()] : [];
+    const newKeys = newProps ? [...newProps.keys()] : [];
+    const oldSet = new Set(oldKeys);
+    const newSet = new Set(newKeys);
+
+    const added = newKeys.filter(function(k) { return !oldSet.has(k); });
+    const removed = oldKeys.filter(function(k) { return !newSet.has(k); });
+
+    if (!added.length && !removed.length) return null;
+
+    var details = [];
+    if (added.length) details.push('added: ' + added.join(', '));
+    if (removed.length) details.push('removed: ' + removed.join(', '));
+    return 'Reactive properties changed (' + details.join('; ') + ')';
+  };
+
+  /**
+   * Detect changes in observedAttributes.
+   * The browser reads this list once at define() time, so changes
+   * cannot take effect without a full page reload.
+   */
+  window.__litHmrObservedAttributesChanged = function(OldClass, NewClass) {
+    const oldAttrs = OldClass.observedAttributes || [];
+    const newAttrs = NewClass.observedAttributes || [];
+    const oldSet = new Set(oldAttrs);
+    const newSet = new Set(newAttrs);
+
+    const added = newAttrs.filter(function(a) { return !oldSet.has(a); });
+    const removed = oldAttrs.filter(function(a) { return !newSet.has(a); });
+
+    if (!added.length && !removed.length) return null;
+
+    var details = [];
+    if (added.length) details.push('added: ' + added.join(', '));
+    if (removed.length) details.push('removed: ' + removed.join(', '));
+    return 'Observed attributes changed (' + details.join('; ') + ')';
+  };
 
   /**
    * Register or update a Lit element.
@@ -107,6 +209,21 @@ if (!window.__LIT_HMR_REGISTRY__) {
       const OldClass = existing.currentClass;
       existing.currentClass = ElementClass;
       existing.moduleUrl = moduleUrl;
+
+      // Detect web component limitations that prevent hot-swapping
+      var reloadReasons = [
+        window.__litHmrConstructorChanged(OldClass, ElementClass),
+        window.__litHmrElementPropertiesChanged(OldClass, ElementClass),
+        window.__litHmrObservedAttributesChanged(OldClass, ElementClass),
+      ].filter(Boolean);
+
+      if (reloadReasons.length > 0) {
+        var reason = '[lit-hmr] Full reload required for <' + tagName + '>:\\n  - ' + reloadReasons.join('\\n  - ');
+        console.warn(reason);
+        window.__LIT_HMR_NEEDS_RELOAD__ = true;
+        window.__LIT_HMR_RELOAD_REASON__ = reason;
+        return;
+      }
 
       const ProxyClass = existing.proxyClass;
 
@@ -302,16 +419,22 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
 
       // Append HMR accept code
       const hmrCode = `
-if (import.meta.hot) {
-  import.meta.hot.accept((newModule) => {
-    // The new module's top-level code has already run,
-    // which called __litHmrDefine with the updated class.
-    // That function handles re-rendering existing instances.
-    // So we don't need to do anything extra here!
-    console.log('[lit-hmr] Module accepted: ${id}');
-  });
-}
-`;
+            if (import.meta.hot) {
+              import.meta.hot.accept((newModule) => {
+                // The new module's top-level code has already run,
+                // which called __litHmrDefine with the updated class.
+                if (window.__LIT_HMR_NEEDS_RELOAD__) {
+                  var reason = window.__LIT_HMR_RELOAD_REASON__;
+                  window.__LIT_HMR_NEEDS_RELOAD__ = false;
+                  window.__LIT_HMR_RELOAD_REASON__ = '';
+                  import.meta.hot.invalidate(reason);
+                } else {
+                  console.log('[lit-hmr] Module accepted: ${id}');
+                }
+              });
+            }
+      `;
+      
       s.append(hmrCode);
 
       return {
