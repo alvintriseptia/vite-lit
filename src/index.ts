@@ -166,7 +166,7 @@ if (!window.__LIT_HMR_REGISTRY__) {
    * On first call: creates a proxy class and registers it with customElements.
    * On subsequent calls: swaps the underlying class and re-renders instances.
    */
-  window.__litHmrDefine = function(tagName, ElementClass, moduleUrl) {
+  window.__litHmrDefine = function(tagName, ElementClass, moduleUrl, deps) {
     const registry = window.__LIT_HMR_REGISTRY__;
     const existing = registry.get(tagName);
 
@@ -209,6 +209,14 @@ if (!window.__LIT_HMR_REGISTRY__) {
       const OldClass = existing.currentClass;
       existing.currentClass = ElementClass;
       existing.moduleUrl = moduleUrl;
+
+      // Ensure the new class is finalized so elementProperties and
+      // observedAttributes are populated. Lit populates these during
+      // finalize() which normally runs on first instance creation.
+      // The new class hasn't had an instance yet, so we trigger it early.
+      if (typeof ElementClass.finalize === 'function') {
+        try { ElementClass.finalize(); } catch(e) {}
+      }
 
       // Detect web component limitations that prevent hot-swapping
       var reloadReasons = [
@@ -310,6 +318,54 @@ if (!window.__LIT_HMR_REGISTRY__) {
         ProxyClass.styles = ElementClass.styles;
       }
 
+      // Patch dependency class instances (controllers, services, etc.)
+      // When a dependency module changes (e.g. counter-controller.ts),
+      // existing instances hold old class objects. We patch the old
+      // prototype in-place so ALL instances (including subclass elements)
+      // pick up the new methods.
+      if (deps) {
+        for (var depName in deps) {
+          var depClass = deps[depName];
+          if (typeof depClass !== 'function' || !depClass.prototype) continue;
+          var patched = false;
+          for (const instance of existing.instances) {
+            var ownKeys = Object.getOwnPropertyNames(instance);
+            for (var i = 0; i < ownKeys.length; i++) {
+              try {
+                var prop = instance[ownKeys[i]];
+                if (prop != null && typeof prop === 'object' &&
+                    prop.constructor && prop.constructor.name === depClass.name &&
+                    prop.constructor !== depClass) {
+                  if (!patched) {
+                    // Patch the old prototype in-place (benefits all instances sharing it)
+                    var depOldProto = Object.getPrototypeOf(prop);
+                    var depNewProto = depClass.prototype;
+                    var protoKeys = Object.getOwnPropertyNames(depNewProto);
+                    for (var j = 0; j < protoKeys.length; j++) {
+                      if (protoKeys[j] === 'constructor') continue;
+                      try {
+                        var depDesc = Object.getOwnPropertyDescriptor(depNewProto, protoKeys[j]);
+                        if (depDesc) Object.defineProperty(depOldProto, protoKeys[j], depDesc);
+                      } catch(e) {}
+                    }
+                    var symKeys = Object.getOwnPropertySymbols(depNewProto);
+                    for (var j = 0; j < symKeys.length; j++) {
+                      try {
+                        var depDesc = Object.getOwnPropertyDescriptor(depNewProto, symKeys[j]);
+                        if (depDesc) Object.defineProperty(depOldProto, symKeys[j], depDesc);
+                      } catch(e) {}
+                    }
+                    patched = true;
+                    console.log('[lit-hmr] Patched ' + depClass.name + ' prototype via <' + tagName + '>');
+                  }
+                }
+              } catch(e) {}
+            }
+            if (patched) break;
+          }
+        }
+      }
+
       // Re-render all existing instances
       console.log(
         '[lit-hmr] Hot updating <' + tagName + '> (v' + existing.version + ', ' +
@@ -360,6 +416,27 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
       let hasTransforms = false;
       const tagNames: string[] = [];
 
+      // Extract local (relative) import bindings to pass as deps for HMR
+      // This enables patching controller/service instances on existing elements
+      const localImports: string[] = [];
+      const LOCAL_IMPORT_RE = /import\s+(?!type\b)(?:(\w+)\s*,?\s*)?(?:\{([^}]*)\})?\s*from\s*['"](\.[^'"]*)['"]/g;
+      let importMatch: RegExpExecArray | null;
+      while ((importMatch = LOCAL_IMPORT_RE.exec(code)) !== null) {
+        const [, defaultImport, namedImports] = importMatch;
+        if (defaultImport) localImports.push(defaultImport);
+        if (namedImports) {
+          for (const binding of namedImports.split(',')) {
+            const trimmed = binding.trim();
+            if (!trimmed || trimmed.startsWith('type ')) continue;
+            const asMatch = trimmed.match(/\S+\s+as\s+(\S+)/);
+            localImports.push(asMatch ? asMatch[1] : trimmed);
+          }
+        }
+      }
+      const depsArg = localImports.length > 0
+        ? `, {${localImports.join(', ')}}`
+        : '';
+
       // Transform customElements.define('tag', Class) calls
       let match: RegExpExecArray | null;
       DEFINE_RE.lastIndex = 0;
@@ -372,7 +449,7 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
         s.overwrite(
           start,
           end,
-          `window.__litHmrDefine(${JSON.stringify(tagName)}, ${className}, ${JSON.stringify(id)})`
+          `window.__litHmrDefine(${JSON.stringify(tagName)}, ${className}, ${JSON.stringify(id)}${depsArg})`
         );
         hasTransforms = true;
       }
@@ -408,7 +485,7 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
           // We'll append the registration at the end of the transform
 
           // For now, append registration code after imports
-          const registrationCode = `\nwindow.__litHmrDefine(${JSON.stringify(tagName)}, ${className}, ${JSON.stringify(id)});\n`;
+          const registrationCode = `\nwindow.__litHmrDefine(${JSON.stringify(tagName)}, ${className}, ${JSON.stringify(id)}${depsArg});\n`;
 
           // Find a good insertion point: after the class definition
           // Look for the class definition position

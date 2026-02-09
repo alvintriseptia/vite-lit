@@ -10,7 +10,7 @@ import { CounterElement } from './counter-element.js';
 @customElement('custom-counter')
 export class CustomCounter extends CounterElement {
   @property({ type: Number })
-  accessor count = 999;
+  accessor count = 4;
 
   render() {
     return html`
