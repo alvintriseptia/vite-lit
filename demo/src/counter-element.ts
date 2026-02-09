@@ -16,6 +16,9 @@ import {
 export class CounterElement extends LitElement {
   private counter = new CounterController(this);
 
+  @property({ type: Number })
+  accessor count = 0;
+
   render() {
     return html`
       <div class="counter-container">
