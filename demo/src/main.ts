@@ -1,6 +1,7 @@
 // Import the custom element definitions
 import './my-element';
 import './counter-element';
+import './custom-counter';
 
 /**
  * Main application entry point
@@ -31,8 +32,12 @@ function initializeApp() {
   // Create first counter element
   const counter1 = document.createElement('counter-element');
 
+  // Create custom counter (subclass with default=999)
+  const customCounter = document.createElement('custom-counter');
+
   // Add elements to the counter section
   counterSection.appendChild(counter1);
+  counterSection.appendChild(customCounter);
 
   // Add a button to dynamically add more counters
   const addButton = document.createElement('button');
