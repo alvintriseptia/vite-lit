@@ -1,50 +1,53 @@
-import { LitElement, css, html } from 'lit';
+import { css, html } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { CounterElement } from './counter-element.js';
 
 /**
- * A simple counter component to test HMR.
- * Try editing the styles, text, or render method while the dev server is running!
+ * A subclass of CounterElement that overrides the default count value.
+ * Used to test that HMR preserves the overridden accessor value
+ * and doesn't revert to the base class default.
  */
-@customElement('counter-element')
-export class CounterElement extends LitElement {
+@customElement('custom-counter')
+export class CustomCounter extends CounterElement {
   @property({ type: Number })
-  accessor count = 0;
+  accessor count = 999;
 
   render() {
     return html`
       <div class="counter-container">
+        <h3>Custom Counter (subclass, default=999)</h3>
         <p>Count: <strong>${this.count}</strong></p>
         <div class="button-group">
-          <button @click=${this._decrement}>-</button>
-          <button @click=${this._reset}>Reset</button>
-          <button @click=${this._increment}>+</button>
+          <button @click=${this._sub}>-</button>
+          <button @click=${this._resetCustom}>Reset to 999</button>
+          <button @click=${this._add}>+</button>
         </div>
         <p class="hint">
-          💡 Try editing this component's styles or text while the dev server is running!
+          Edit this template to test HMR — the count value should persist!
         </p>
       </div>
     `;
   }
 
-  private _increment() {
+  private _add() {
     this.count++;
   }
 
-  private _decrement() {
+  private _sub() {
     this.count--;
   }
 
-  private _reset() {
-    this.count = 0;
+  private _resetCustom() {
+    this.count = 999;
   }
 
   static styles = css`
     :host {
       display: block;
       padding: 2rem;
-      border: 2px solid #646cff;
+      border: 2px solid #ff6464;
       border-radius: 8px;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      background: linear-gradient(135deg, #2e1a1a 0%, #3e1621 100%);
       margin: 1rem 0;
     }
 
@@ -52,10 +55,9 @@ export class CounterElement extends LitElement {
       text-align: center;
     }
 
-    h2 {
+    h3 {
       color: #ff6464;
       margin-top: 0;
-      font-size: 2em;
     }
 
     p {
@@ -64,7 +66,7 @@ export class CounterElement extends LitElement {
     }
 
     strong {
-      color: #4ade80;
+      color: #ffb347;
       font-size: 1.5em;
     }
 
@@ -79,7 +81,7 @@ export class CounterElement extends LitElement {
       padding: 0.8rem 1.5rem;
       font-size: 1.1em;
       font-weight: bold;
-      border: 2px solid #646cff;
+      border: 2px solid #ff6464;
       border-radius: 6px;
       background: #1a1a1a;
       color: #fff;
@@ -88,9 +90,9 @@ export class CounterElement extends LitElement {
     }
 
     button:hover {
-      background: #646cff;
+      background: #ff6464;
       transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(100, 108, 255, 0.4);
+      box-shadow: 0 4px 12px rgba(255, 100, 100, 0.4);
     }
 
     button:active {
@@ -108,6 +110,6 @@ export class CounterElement extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'counter-element': CounterElement;
+    'custom-counter': CustomCounter;
   }
 }
