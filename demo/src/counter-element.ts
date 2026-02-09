@@ -8,7 +8,7 @@ import { customElement, property } from 'lit/decorators.js';
 @customElement('counter-element')
 export class CounterElement extends LitElement {
   @property({ type: Number })
-  count = 0;
+  accessor count = 0;
 
   render() {
     return html`

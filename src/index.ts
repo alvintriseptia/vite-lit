@@ -249,6 +249,28 @@ if (!window.__LIT_HMR_REGISTRY__) {
         if (key === 'constructor') continue;
         const descriptor = Object.getOwnPropertyDescriptor(newProto, key);
         if (descriptor) {
+          // Accessor properties (get/set) from the TC39 'accessor' keyword compile
+          // into private backing fields (e.g. #count). Private fields are per-class,
+          // so the new class's getter/setter can't access the old class's private slot
+          // on existing instances. Detect this and skip patching those descriptors —
+          // the old getter/setter still works because instances have the old private field.
+          if ((descriptor.get || descriptor.set) && existing.instances.size > 0) {
+            var testInstance = existing.instances.values().next().value;
+            var usesPrivateField = false;
+            if (descriptor.get) {
+              try {
+                descriptor.get.call(testInstance);
+              } catch (e) {
+                if (e instanceof TypeError) {
+                  usesPrivateField = true;
+                }
+              }
+            }
+            if (usesPrivateField) {
+              console.warn('[lit-hmr] Skipping accessor "' + String(key) + '" (uses private backing field from accessor keyword)');
+              continue;
+            }
+          }
           Object.defineProperty(proxyProto, key, descriptor);
         }
       }

@@ -15,13 +15,13 @@ export class MyElement extends LitElement {
    * Copy for the read the docs hint.
    */
   @property()
-  docsHint = 'Click on the Vite and Lit logos to learn more'
+  accessor docsHint = 'Click on the Vite and Lit logos to learn more'
 
   /**
    * The number of times the button has been clicked.
    */
   @property({ type: Number })
-  count = 0
+  accessor count = 0
 
   render() {
     return html`
