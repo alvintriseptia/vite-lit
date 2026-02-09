@@ -1,50 +1,53 @@
-import { LitElement, css, html } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { LitElement, css, html, unsafeCSS } from 'lit';
+import { customElement } from 'lit/decorators.js';
+import { CounterController } from './counter-controller.ts';
+import {
+  COUNTER_TITLE,
+  COUNTER_HINT_TEXT,
+  COLORS,
+} from './constants.ts';
 
 /**
- * A simple counter component to test HMR.
- * Try editing the styles, text, or render method while the dev server is running!
+ * A counter component powered by a ReactiveController and shared constants.
+ * Try editing constants.ts, counter-controller.ts, or this file
+ * while the dev server is running to test HMR!
  */
 @customElement('counter-element')
 export class CounterElement extends LitElement {
-  @property({ type: Number })
-  count = 0;
+  private counter = new CounterController(this);
 
   render() {
     return html`
       <div class="counter-container">
-        <p>Count: <strong>${this.count}</strong></p>
+        <h2>${COUNTER_TITLE}</h2>
+        <p>Count: <strong>${this.counter.displayValue}</strong></p>
         <div class="button-group">
-          <button @click=${this._decrement}>-</button>
-          <button @click=${this._reset}>Reset</button>
-          <button @click=${this._increment}>+</button>
+          <button
+            @click=${() => this.counter.decrement()}
+            ?disabled=${this.counter.isAtMin}
+          >-</button>
+          <button @click=${() => this.counter.reset()}>Reset</button>
+          <button
+            @click=${() => this.counter.increment()}
+            ?disabled=${this.counter.isAtMax}
+          >+</button>
         </div>
-        <p class="hint">
-          💡 Try editing this component's styles or text while the dev server is running!
-        </p>
+        <p class="hint">${COUNTER_HINT_TEXT}</p>
       </div>
     `;
-  }
-
-  private _increment() {
-    this.count++;
-  }
-
-  private _decrement() {
-    this.count--;
-  }
-
-  private _reset() {
-    this.count = 0;
   }
 
   static styles = css`
     :host {
       display: block;
       padding: 2rem;
-      border: 2px solid #646cff;
+      border: 2px solid ${unsafeCSS(COLORS.primary)};
       border-radius: 8px;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      background: linear-gradient(
+        135deg,
+        ${unsafeCSS(COLORS.background)} 0%,
+        ${unsafeCSS(COLORS.backgroundAlt)} 100%
+      );
       margin: 1rem 0;
     }
 
@@ -53,18 +56,18 @@ export class CounterElement extends LitElement {
     }
 
     h2 {
-      color: #ff6464;
+      color: ${unsafeCSS(COLORS.warning)};
       margin-top: 0;
       font-size: 2em;
     }
 
     p {
       font-size: 1.2em;
-      color: #fff;
+      color: ${unsafeCSS(COLORS.text)};
     }
 
     strong {
-      color: #4ade80;
+      color: ${unsafeCSS(COLORS.accent)};
       font-size: 1.5em;
     }
 
@@ -79,28 +82,33 @@ export class CounterElement extends LitElement {
       padding: 0.8rem 1.5rem;
       font-size: 1.1em;
       font-weight: bold;
-      border: 2px solid #646cff;
+      border: 2px solid ${unsafeCSS(COLORS.primary)};
       border-radius: 6px;
-      background: #1a1a1a;
-      color: #fff;
+      background: ${unsafeCSS(COLORS.surface)};
+      color: ${unsafeCSS(COLORS.text)};
       cursor: pointer;
       transition: all 0.3s ease;
     }
 
-    button:hover {
-      background: #646cff;
+    button:hover:not(:disabled) {
+      background: ${unsafeCSS(COLORS.primary)};
       transform: translateY(-2px);
       box-shadow: 0 4px 12px rgba(100, 108, 255, 0.4);
     }
 
-    button:active {
+    button:active:not(:disabled) {
       transform: translateY(0);
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
     }
 
     .hint {
       margin-top: 1.5rem;
       font-size: 0.9em;
-      color: #888;
+      color: ${unsafeCSS(COLORS.textMuted)};
       font-style: italic;
     }
   `;
