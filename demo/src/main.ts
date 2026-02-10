@@ -2,6 +2,7 @@
 import './my-element';
 import './counter-element';
 import './custom-counter';
+import './zustand-element';
 
 /**
  * Main application entry point
@@ -71,8 +72,12 @@ function initializeApp() {
     console.log('Added new counter element');
   });
 
+  // Create zustand demo element
+  const zustandDemo = document.createElement('zustand-element');
+
   // Assemble the app
   app.appendChild(myElement);
+  app.appendChild(zustandDemo);
   app.appendChild(addButton);
   app.appendChild(counterSection);
 
