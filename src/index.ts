@@ -51,347 +51,94 @@ function isLitFile(code: string): boolean {
   );
 }
 
-/**
- * The HMR runtime code injected into the client.
- * This maintains the registry and handles hot-swapping.
- */
-const HMR_RUNTIME = `
-if (!window.__LIT_HMR_REGISTRY__) {
-  window.__LIT_HMR_REGISTRY__ = new Map();
-  window.__LIT_HMR_NEEDS_RELOAD__ = false;
-  window.__LIT_HMR_RELOAD_REASON__ = '';
-
-  /**
-   * Detect constructor changes between old and new class.
-   * Compares constructor source and parses 'this.xxx =' patterns
-   * to report which fields were added/removed.
-   */
-  window.__litHmrConstructorChanged = function(OldClass, NewClass) {
-    // OldClass.prototype.constructor.toString() returns the ENTIRE class source,
-    // so we need to extract just the constructor body to avoid false positives
-    // from CSS/render/method changes.
-    function extractConstructorBody(classSource) {
-      var ctorMatch = classSource.match(/constructor\\s*\\([^)]*\\)\\s*\\{/);
-      if (!ctorMatch) return null;
-      var start = classSource.indexOf(ctorMatch[0]) + ctorMatch[0].length;
-      var braceCount = 1;
-      var pos = start;
-      while (pos < classSource.length && braceCount > 0) {
-        if (classSource[pos] === '{') braceCount++;
-        if (classSource[pos] === '}') braceCount--;
-        pos++;
-      }
-      return classSource.slice(start, pos - 1).trim();
-    }
-
-    var oldSource = OldClass.prototype.constructor.toString();
-    var newSource = NewClass.prototype.constructor.toString();
-    var oldBody = extractConstructorBody(oldSource);
-    var newBody = extractConstructorBody(newSource);
-
-    // If neither class has an explicit constructor, no change
-    if (oldBody === null && newBody === null) return null;
-    // If both have the same constructor body, no change
-    if (oldBody === newBody) return null;
-
-    // Parse 'this.xxx =' assignments to report specifics
-    var fieldPattern = /this\\.([a-zA-Z_$][\\w$]*)\\s*=/g;
-    var oldFields = new Set();
-    var newFields = new Set();
-    var m;
-    if (oldBody) { while ((m = fieldPattern.exec(oldBody)) !== null) oldFields.add(m[1]); }
-    fieldPattern.lastIndex = 0;
-    if (newBody) { while ((m = fieldPattern.exec(newBody)) !== null) newFields.add(m[1]); }
-
-    var added = [...newFields].filter(function(f) { return !oldFields.has(f); });
-    var removed = [...oldFields].filter(function(f) { return !newFields.has(f); });
-
-    var details = [];
-    if (added.length) details.push('added fields: ' + added.join(', '));
-    if (removed.length) details.push('removed fields: ' + removed.join(', '));
-    if (!details.length) details.push('constructor body changed');
-
-    return 'Constructor changed (' + details.join('; ') + ')';
-  };
-
-  /**
-   * Detect changes in reactive property declarations.
-   * Compares key sets of elementProperties (populated by @property()/@state()).
-   */
-  window.__litHmrElementPropertiesChanged = function(OldClass, NewClass) {
-    const oldProps = OldClass.elementProperties;
-    const newProps = NewClass.elementProperties;
-    if (!oldProps && !newProps) return null;
-
-    const oldKeys = oldProps ? [...oldProps.keys()] : [];
-    const newKeys = newProps ? [...newProps.keys()] : [];
-    const oldSet = new Set(oldKeys);
-    const newSet = new Set(newKeys);
-
-    const added = newKeys.filter(function(k) { return !oldSet.has(k); });
-    const removed = oldKeys.filter(function(k) { return !newSet.has(k); });
-
-    if (!added.length && !removed.length) return null;
-
-    var details = [];
-    if (added.length) details.push('added: ' + added.join(', '));
-    if (removed.length) details.push('removed: ' + removed.join(', '));
-    return 'Reactive properties changed (' + details.join('; ') + ')';
-  };
-
-  /**
-   * Detect changes in observedAttributes.
-   * The browser reads this list once at define() time, so changes
-   * cannot take effect without a full page reload.
-   */
-  window.__litHmrObservedAttributesChanged = function(OldClass, NewClass) {
-    const oldAttrs = OldClass.observedAttributes || [];
-    const newAttrs = NewClass.observedAttributes || [];
-    const oldSet = new Set(oldAttrs);
-    const newSet = new Set(newAttrs);
-
-    const added = newAttrs.filter(function(a) { return !oldSet.has(a); });
-    const removed = oldAttrs.filter(function(a) { return !newSet.has(a); });
-
-    if (!added.length && !removed.length) return null;
-
-    var details = [];
-    if (added.length) details.push('added: ' + added.join(', '));
-    if (removed.length) details.push('removed: ' + removed.join(', '));
-    return 'Observed attributes changed (' + details.join('; ') + ')';
-  };
-
-  /**
-   * Register or update a Lit element.
-   * On first call: creates a proxy class and registers it with customElements.
-   * On subsequent calls: swaps the underlying class and re-renders instances.
-   */
-  window.__litHmrDefine = function(tagName, ElementClass, moduleUrl, deps) {
-    const registry = window.__LIT_HMR_REGISTRY__;
-    const existing = registry.get(tagName);
-
-    if (!existing) {
-      // First registration: create a thin wrapper class that delegates to the real one.
-      // We register THIS wrapper with customElements — it never changes.
-      // But we can swap what "real class" it delegates to.
-
-      const record = {
-        currentClass: ElementClass,
-        version: 0,
-        instances: new Set(),
-        moduleUrl: moduleUrl,
-      };
-
-      // The proxy class extends the FIRST version of the element.
-      // On HMR updates, we patch its prototype chain.
-      class HmrProxyElement extends ElementClass {
-        constructor() {
-          super();
-          record.instances.add(this);
-        }
-
-        disconnectedCallback() {
-          super.disconnectedCallback?.();
-          record.instances.delete(this);
-        }
-      }
-
-      // Store reference to the proxy so we can patch it later
-      record.proxyClass = HmrProxyElement;
-
-      registry.set(tagName, record);
-
-      // Register with the real customElements registry — this only happens once
-      customElements.define(tagName, HmrProxyElement);
-    } else {
-      // HMR update: swap the class
-      existing.version++;
-      const OldClass = existing.currentClass;
-      existing.currentClass = ElementClass;
-      existing.moduleUrl = moduleUrl;
-
-      // Ensure the new class is finalized so elementProperties and
-      // observedAttributes are populated. Lit populates these during
-      // finalize() which normally runs on first instance creation.
-      // The new class hasn't had an instance yet, so we trigger it early.
-      if (typeof ElementClass.finalize === 'function') {
-        try { ElementClass.finalize(); } catch(e) {}
-      }
-
-      // Detect web component limitations that prevent hot-swapping
-      var reloadReasons = [
-        window.__litHmrConstructorChanged(OldClass, ElementClass),
-        window.__litHmrElementPropertiesChanged(OldClass, ElementClass),
-        window.__litHmrObservedAttributesChanged(OldClass, ElementClass),
-      ].filter(Boolean);
-
-      if (reloadReasons.length > 0) {
-        var reason = '[lit-hmr] Full reload required for <' + tagName + '>:\\n  - ' + reloadReasons.join('\\n  - ');
-        console.warn(reason);
-        window.__LIT_HMR_NEEDS_RELOAD__ = true;
-        window.__LIT_HMR_RELOAD_REASON__ = reason;
-        return;
-      }
-
-      const ProxyClass = existing.proxyClass;
-
-      // Patch the prototype chain:
-      // Copy all new prototype methods/properties onto the proxy prototype
-      const newProto = ElementClass.prototype;
-      const proxyProto = ProxyClass.prototype;
-
-      // Get all property names from new class prototype
-      const newKeys = new Set([
-        ...Object.getOwnPropertyNames(newProto),
-        ...Object.getOwnPropertySymbols(newProto),
-      ]);
-
-      // Get old keys to detect removed methods
-      const oldKeys = new Set([
-        ...Object.getOwnPropertyNames(proxyProto),
-        ...Object.getOwnPropertySymbols(proxyProto),
-      ]);
-
-      // Copy new/updated properties
-      for (const key of newKeys) {
-        if (key === 'constructor') continue;
-        const descriptor = Object.getOwnPropertyDescriptor(newProto, key);
-        if (descriptor) {
-          // Accessor properties (get/set) from the TC39 'accessor' keyword compile
-          // into private backing fields (e.g. #count). Private fields are per-class,
-          // so the new class's getter/setter can't access the old class's private slot
-          // on existing instances. Detect this and skip patching those descriptors —
-          // the old getter/setter still works because instances have the old private field.
-          if ((descriptor.get || descriptor.set) && existing.instances.size > 0) {
-            var testInstance = existing.instances.values().next().value;
-            var usesPrivateField = false;
-            if (descriptor.get) {
-              try {
-                descriptor.get.call(testInstance);
-              } catch (e) {
-                if (e instanceof TypeError) {
-                  usesPrivateField = true;
-                }
-              }
-            }
-            if (usesPrivateField) {
-              console.warn('[lit-hmr] Skipping accessor "' + String(key) + '" (uses private backing field from accessor keyword)');
-              continue;
-            }
-          }
-          Object.defineProperty(proxyProto, key, descriptor);
-        }
-      }
-
-      // Copy static properties (styles, properties, etc.)
-      const staticKeys = [
-        ...Object.getOwnPropertyNames(ElementClass),
-        ...Object.getOwnPropertySymbols(ElementClass),
-      ];
-      for (const key of staticKeys) {
-        if (['prototype', 'length', 'name'].includes(key)) continue;
-        try {
-          const descriptor = Object.getOwnPropertyDescriptor(ElementClass, key);
-          if (descriptor) {
-            Object.defineProperty(ProxyClass, key, descriptor);
-          }
-        } catch (e) {
-          // Some static properties may not be configurable
-        }
-      }
-
-      // Critical: update Lit's internal static caches
-      // Lit caches 'styles' and 'elementProperties' as finalized statics.
-      // We need to bust these caches so Lit re-evaluates them.
-      if (ElementClass.elementProperties) {
-        ProxyClass.elementProperties = ElementClass.elementProperties;
-      }
-
-      // Force Lit to re-finalize by clearing the finalized flag
-      // Lit uses a private static __finalized or similar — we reset it
-      // by deleting known cache keys
-      delete ProxyClass._$litElement$;
-      delete ProxyClass['finalized'];
-
-      // Adopt-sheet the new styles
-      if (ElementClass.styles !== undefined) {
-        ProxyClass.styles = ElementClass.styles;
-      }
-
-      // Patch dependency class instances (controllers, services, etc.)
-      // When a dependency module changes (e.g. counter-controller.ts),
-      // existing instances hold old class objects. We patch the old
-      // prototype in-place so ALL instances (including subclass elements)
-      // pick up the new methods.
-      if (deps) {
-        for (var depName in deps) {
-          var depClass = deps[depName];
-          if (typeof depClass !== 'function' || !depClass.prototype) continue;
-          var patched = false;
-          for (const instance of existing.instances) {
-            var ownKeys = Object.getOwnPropertyNames(instance);
-            for (var i = 0; i < ownKeys.length; i++) {
-              try {
-                var prop = instance[ownKeys[i]];
-                if (prop != null && typeof prop === 'object' &&
-                    prop.constructor && prop.constructor.name === depClass.name &&
-                    prop.constructor !== depClass) {
-                  if (!patched) {
-                    // Patch the old prototype in-place (benefits all instances sharing it)
-                    var depOldProto = Object.getPrototypeOf(prop);
-                    var depNewProto = depClass.prototype;
-                    var protoKeys = Object.getOwnPropertyNames(depNewProto);
-                    for (var j = 0; j < protoKeys.length; j++) {
-                      if (protoKeys[j] === 'constructor') continue;
-                      try {
-                        var depDesc = Object.getOwnPropertyDescriptor(depNewProto, protoKeys[j]);
-                        if (depDesc) Object.defineProperty(depOldProto, protoKeys[j], depDesc);
-                      } catch(e) {}
-                    }
-                    var symKeys = Object.getOwnPropertySymbols(depNewProto);
-                    for (var j = 0; j < symKeys.length; j++) {
-                      try {
-                        var depDesc = Object.getOwnPropertyDescriptor(depNewProto, symKeys[j]);
-                        if (depDesc) Object.defineProperty(depOldProto, symKeys[j], depDesc);
-                      } catch(e) {}
-                    }
-                    patched = true;
-                    console.log('[lit-hmr] Patched ' + depClass.name + ' prototype via <' + tagName + '>');
-                  }
-                }
-              } catch(e) {}
-            }
-            if (patched) break;
-          }
-        }
-      }
-
-      // Re-render all existing instances
-      console.log(
-        '[lit-hmr] Hot updating <' + tagName + '> (v' + existing.version + ', ' +
-        existing.instances.size + ' instance(s))'
-      );
-
-      for (const instance of existing.instances) {
-        try {
-          // Update the instance's adopted stylesheets if shadow root exists
-          if (instance.renderRoot && instance.renderRoot.adoptedStyleSheets) {
-            // Let Lit handle re-adopting styles on next render
-          }
-
-          // Force Lit to re-render
-          instance.requestUpdate();
-        } catch (e) {
-          console.warn('[lit-hmr] Error updating instance of <' + tagName + '>:', e);
-        }
-      }
-    }
-  };
-}
-`;
-
-export default function litHmr(options: PluginOptions = {}): Plugin {
+export function litHmr(options: PluginOptions = {}): Plugin {
   let server: ViteDevServer;
+
+  /**
+   * The HMR runtime code injected into the client.
+   * This maintains the registry and handles hot-swapping.
+   */
+  const HMR_RUNTIME = (propsAndState: Array<{ type: "string" | "number" | "bigint" | "boolean" | "symbol" | "undefined" | "object" | "function"; name: string; value: unknown }>) => `
+    window.__LIT_HMR_REGISTRY__ ??= new Map();
+    window.__propsAndState__ = ${JSON.stringify(propsAndState)};
+
+    /**
+     * Register or update a Lit element.
+     * On first call: creates a proxy class and registers it with customElements.
+     * On subsequent calls: swaps the underlying class and re-renders instances.
+     */
+    window.__litHmrDefine ??= function(tagName, ElementClass, moduleUrl, deps) {
+      const registry = window.__LIT_HMR_REGISTRY__;
+      const existing = registry.get(tagName);
+
+      if (!existing) {
+        // The proxy class extends the FIRST version of the element.
+        // On HMR updates, we patch its prototype chain.
+        const record = {
+          elementClass: ElementClass,
+          tagName,
+          instances: new Set(),
+        }
+
+        class HmrProxyElement extends ElementClass {
+          constructor() {
+            super();
+            record.instances.add(this);
+          }
+
+          disconnectedCallback() {
+            record.instances.delete(this);
+            if (super.disconnectedCallback) {
+              super.disconnectedCallback();
+            }
+          }
+        }
+
+        // Store reference to the proxy so we can patch it later
+        record.proxyClass = HmrProxyElement;
+        registry.set(tagName, record);
+
+        // Register with the real customElements registry — this only happens once
+        customElements.define(tagName, HmrProxyElement);
+      } else {
+        // HMR update: swap the class
+
+        // Re-render all existing instances
+        console.log('[lit-hmr] Hot updating <' + tagName + '>', existing.instances.size, 'instances');
+
+        const oldProto = existing.proxyClass.prototype;
+        const newProto = ElementClass.prototype;
+
+        // Patch the prototype chain
+        for (const key of Reflect.ownKeys(newProto)) {
+          if (key === 'constructor') continue;
+
+          const desc = Object.getOwnPropertyDescriptor(newProto, key);
+
+          if (desc.get || desc.set) {
+            continue;
+          }
+
+          try {
+            Object.defineProperty(oldProto, key, desc);
+          } catch (err) {
+            console.warn('[lit-hmr] Failed to patch', key, err);
+          }
+        }
+
+        existing.instances.forEach((instance) => {
+          // Trigger an update/render if applicable
+          if (typeof instance.requestUpdate === 'function') {
+            instance.requestUpdate();
+          }
+        });
+
+        // Update the stored class reference
+        console.log('[lit-hmr] Updated class for <' + tagName + '>', existing.elementClass, '→', ElementClass);
+        existing.elementClass = ElementClass;
+      }
+    };
+    `;
 
   return {
     name: "vite-plugin-lit-hmr",
@@ -513,8 +260,52 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
 
       if (!hasTransforms) return null;
 
+      // Get all properties and state decorator fields and its value to potentially patch
+      // Empty line means the end of the code
+      const propsAndState: Array<{ type: "string" | "number" | "bigint" | "boolean" | "symbol" | "undefined" | "object" | "function"; name: string; value: unknown }> = [];
+      const PROP_RE = /@property\(\s*(?:\{[^}]*\}\s*)?\)\s*(?:public|private|protected)?\s*(?:accessor\s+)?([a-zA-Z_$][\w$]*)/g;
+      const STATE_RE = /@state\(\s*(?:\{[^}]*\}\s*)?\)\s*(?:public|private|protected)?\s*(?:accessor\s+)?([a-zA-Z_$][\w$]*)/g;
+
+      let propMatch: RegExpExecArray | null;
+      PROP_RE.lastIndex = 0;
+      while ((propMatch = PROP_RE.exec(code)) !== null) {
+        const [, propName] = propMatch;
+        // get the value, new line or semicolon ends the value
+        const valueMatch = code.slice(propMatch.index).match(new RegExp(`@property\\(\\s*(?:\\{[^}]*\\}\\s*)?\\)\\s*(?:public|private|protected)?\\s*(?:accessor\\s+)?${propName}\\s*=\\s*([^;\\n]+)`));
+        let value: unknown = undefined;
+        if (valueMatch) {
+          try {
+            value = eval(valueMatch[1]);
+          } catch (e) {
+            console.warn(`[lit-hmr] Failed to evaluate value for property ${propName}: ${e}`);
+          }
+        }
+        propsAndState.push({ type: typeof value, name: propName, value });
+      }
+
+      let stateMatch: RegExpExecArray | null;
+      STATE_RE.lastIndex = 0;
+      while ((stateMatch = STATE_RE.exec(code)) !== null) {
+        const [, stateName] = stateMatch;
+        // get the value, new line or semicolon ends the value
+        const valueMatch = code.slice(stateMatch.index).match(new RegExp(`@state\\(\\s*(?:\\{[^}]*\\}\\s*)?\\)\\s*(?:public|private|protected)?\\s*(?:accessor\\s+)?${stateName}\\s*=\\s*([^;\\n]+)`));
+        let value: unknown = undefined;
+        if (valueMatch) {
+          try {
+            value = eval(valueMatch[1]);
+          } catch (e) {
+            console.warn(`[lit-hmr] Failed to evaluate value for state ${stateName}: ${e}`);
+          }
+        }
+        propsAndState.push({ type: typeof value, name: stateName, value });
+      }
+
+      if (propsAndState.length > 0) {
+        console.log(`[lit-hmr] Detected @property/@state fields in ${id}:`, propsAndState);
+      }
+
       // Prepend the HMR runtime (idempotent, checks for existing)
-      s.prepend(HMR_RUNTIME + "\n");
+      s.prepend(HMR_RUNTIME(propsAndState) + "\n");
 
       // Append HMR accept code
       const hmrCode = `
@@ -526,14 +317,15 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
                   var reason = window.__LIT_HMR_RELOAD_REASON__;
                   window.__LIT_HMR_NEEDS_RELOAD__ = false;
                   window.__LIT_HMR_RELOAD_REASON__ = '';
-                  import.meta.hot.invalidate(reason);
+                  console.warn('[HMR] invalidate HMR', reason);
+                  // import.meta.hot.invalidate(reason);
                 } else {
                   console.log('[lit-hmr] Module accepted: ${id}');
                 }
               });
             }
       `;
-      
+
       s.append(hmrCode);
 
       return {
@@ -544,4 +336,101 @@ export default function litHmr(options: PluginOptions = {}): Plugin {
   };
 }
 
-export { litHmr };
+export function litHmrPost(options: PluginOptions = {}): Plugin {
+  let server: ViteDevServer;
+
+  // Updating properties and state on existing instances requires patching
+  const HMR_POST_RUNTIME = (name: string) => `
+    // Patch __privateGet and __privateSet to handle Lit HMR
+    function patchPrivateAccessors() {
+        const tagName = ${JSON.stringify(name)};
+        console.log('[lit-hmr] Patching private accessors for <' + tagName + '>');
+        const existing = window.__LIT_HMR_REGISTRY__.get(tagName);
+        console.log('[lit-hmr] Found registry entry:', existing);
+        if (existing) {
+          const proxyClass = existing.proxyClass;
+          // Patch the prototype chain
+          for (const key of Object.getOwnPropertyNames(existing.elementClass.prototype)) {
+            if (key === 'constructor') continue;
+
+            const desc = Object.getOwnPropertyDescriptor(existing.elementClass.prototype, key);
+            if (desc.get || desc.set) {
+              const propInfo = window.__propsAndState__.find(p => p.name === key);
+              if (propInfo) {
+                console.log('[lit-hmr] Patching accessor', key, 'type:', propInfo.type, existing.elementClass.prototype[key], '→', propInfo.value);
+                existing.instances.forEach((instance) => {
+                  // Trigger an update/render if applicable
+                  if (typeof instance.requestUpdate === 'function') {
+                    // Patch the property value to trigger the setter
+                    try {
+                      instance[key] = propInfo.value;
+                    } catch (e) {
+                      console.warn('[lit-hmr] Failed to patch property', key, e);
+                    }
+                    instance.requestUpdate();
+                  }
+                });
+              }
+            }
+          }
+        }
+      }
+
+      patchPrivateAccessors();
+  `;
+
+  return {
+    name: "vite-plugin-lit-hmr-post",
+    enforce: "post",
+
+    configureServer(_server) {
+      server = _server;
+    },
+
+    transform(code: string, id: string) {
+      // Skip node_modules (except for specific packages if needed)
+      if (id.includes("node_modules")) return null;
+
+      // Only process files that look like they contain Lit elements
+      if (!isLitFile(code)) return null;
+
+      const s = new MagicString(code);
+      let hasTransforms = false;
+      // Override var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+      // To always return true
+      const ACCESS_CHECK_RE = /var\s+__accessCheck\s*=\s*\(obj,\s*member,\s*msg\)\s*=>\s*member\.has\(obj\)\s*\|\|\s*__typeError\("Cannot\s+"\s*\+\s*msg\);/;
+      if (ACCESS_CHECK_RE.test(code)) {
+        s.overwrite(
+          code.match(ACCESS_CHECK_RE)!.index!,
+          code.match(ACCESS_CHECK_RE)!.index! + code.match(ACCESS_CHECK_RE)![0].length,
+          'var __accessCheck = (obj, member, msg) => true; // patched by lit-hmr'
+        );
+        hasTransforms = true;
+      }
+
+
+      // Find tag name `window.__litHmrDefine('tag-name', ClassName, ...)` calls to know which elements to patch
+      const LIT_HMR_DEFINE_RE = /window\.__litHmrDefine\(\s*(['"`])([^'"`]+)\1\s*,\s*([a-zA-Z_$][\w$]*)\s*,\s*([^,]+)(?:,[^)]+)?\s*\)/g;
+      const tagNames: string[] = [];
+      let match: RegExpExecArray | null;
+      LIT_HMR_DEFINE_RE.lastIndex = 0;
+      while ((match = LIT_HMR_DEFINE_RE.exec(code)) !== null) {
+        const [, _quote, tagName] = match;
+        tagNames.push(tagName);
+      }
+      
+      // Append the post runtime for each tag name
+      for (const tagName of tagNames) {
+        s.append(HMR_POST_RUNTIME(tagName) + "\n");
+        hasTransforms = true;
+      }
+
+      if (!hasTransforms) return null;
+
+      return {
+        code: s.toString(),
+        map: s.generateMap({ hires: true }),
+      };
+    }
+  }
+}
